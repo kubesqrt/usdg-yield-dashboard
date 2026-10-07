@@ -31,6 +31,10 @@ MIN_SUPPLY_TVL = 10_000
 MIN_LP_TVL = 50_000
 MIN_HISTORY_TVL = 25_000
 HISTORY_DAYS = 90
+MIN_UNLISTED_TVL = 250_000
+
+# Excluded after audit: T3tris KFV is a self-valued vault with one holder and no on-chain USDG.
+EXCLUDE_PROJECTS = {"t3tris-finance"}
 
 PROJECT_NAMES = {
     "aave-v3": "Aave V3",
@@ -81,11 +85,17 @@ SOURCES = {
     "arcadia-v2": ("Lending", "Arcadia lending pool: USDG lent to leveraged LP/margin accounts, paying interest."),
     "flock-credit": ("Lending", "Small lending vault backed by veUP collateral; very high APY reflects thin TVL and high borrower demand - treat with caution."),
     "kamino-vault": ("Curated vault", "Kamino Earn vault: a curator (Steakhouse, Sentora, Elemental, OnRe...) allocates USDG across Kamino lending reserves on Solana. Yield = borrower interest from those reserves net of fees, plus any Kamino farm rewards. Its deposits sit inside the Kamino reserves listed separately, so it is excluded from totals."),
+    "mellow": ("Curated vault", "Mellow vault: a curator deploys USDG into a basket of DeFi lending strategies; yield is the vault's realised share-price growth (7-day average). Deposits and withdrawals go through queues."),
+    "gmx-glv": ("Perp liquidity", "GMX GLV vault holding only USDG: liquidity for GMX perpetual traders. Yield = trading/borrow fees, but depositors are the counterparty to traders' PnL, so value can fall. A Merkl launch boost is paid on top."),
     "morpho-market": ("Direct market", "Supplying directly into a single Morpho Blue market (no curator). Yield = interest from borrowers of that one collateral type; this TVL is mostly the vaults above, so it is excluded from totals."),
 }
 LP_SOURCE = ("DEX LP", "Trading fees (and sometimes token incentives) from providing USDG liquidity in a pair. Exposed to the other token's price and to impermanent loss; not pure supply yield.")
 
 CHAIN_NAMES = {"Xlayer": "X Layer"}
+
+
+def fmt_usd(v):
+    return f"${v / 1e6:.2f}M" if v >= 1e6 else f"${v / 1e3:.0f}k"
 
 
 def get_json(url, data=None, retries=3):
@@ -142,15 +152,16 @@ def fetch_morpho():
     vaults, markets = [], []
     try:
         d = morpho_query(
-            "{ vaultV2s(first:100, where:{assetAddress_in:%s, totalAssetsUsd_gte:10000, listed:true}) "
-            "{ items { address name symbol chain { id network } totalAssetsUsd liquidityUsd idleAssetsUsd apy netApy performanceFee "
+            "{ vaultV2s(first:100, where:{assetAddress_in:%s, totalAssetsUsd_gte:10000}) "
+            "{ items { address name symbol listed chain { id network } totalAssetsUsd liquidityUsd idleAssetsUsd apy netApy performanceFee "
             "rewards { asset { symbol } supplyApr } curators { items { name } } } } }" % addrs)
-        vaults = d["vaultV2s"]["items"]
+        # Unlisted (not shown in the Morpho app) only when large enough to matter.
+        vaults = [v for v in d["vaultV2s"]["items"] if v.get("listed") or (v.get("totalAssetsUsd") or 0) >= MIN_UNLISTED_TVL]
         d = morpho_query(
-            "{ markets(first:100, where:{loanAssetAddress_in:%s, listed:true}) { items { marketId "
+            "{ markets(first:100, where:{loanAssetAddress_in:%s, supplyAssetsUsd_gte:50000}) { items { marketId listed "
             "morphoBlue { chain { id network } } collateralAsset { symbol } lltv "
             "state { supplyAssetsUsd supplyApy netSupplyApy borrowApy utilization } } } }" % addrs)
-        markets = d["markets"]["items"]
+        markets = [m for m in d["markets"]["items"] if m.get("listed") or ((m.get("state") or {}).get("supplyAssetsUsd") or 0) >= MIN_UNLISTED_TVL]
     except Exception as e:  # noqa: BLE001
         print(f"morpho api failed: {e}", file=sys.stderr)
     return vaults, markets
@@ -265,6 +276,42 @@ def fetch_loopscale():
     return out
 
 
+PENDLE_CHAINS = {1: "Ethereum", 196: "X Layer", 4663: "Robinhood Chain"}
+GMX_USDG_GLV = "0x4cd5a94a30876320ac65f2e192493ee476f13866"
+
+
+def fetch_pendle():
+    out = []
+    for cid, chain in PENDLE_CHAINS.items():
+        d = get_json(f"https://api-v2.pendle.finance/core/v1/{cid}/markets/active")
+        for m in d.get("markets") or []:
+            under = (m.get("underlyingAsset") or "").split("-")[-1].lower()
+            if under in USDG_ADDRESSES and (m.get("details") or {}).get("liquidity", 0) >= 50_000:
+                out.append({"chain": chain, "chainId": cid, "address": m["address"], "expiry": m["expiry"][:10],
+                            "implied": m["details"]["impliedApy"] * 100, "liquidity": m["details"]["liquidity"]})
+    return out
+
+
+def fetch_mellow():
+    out = []
+    for v in get_json("https://api.mellow.finance/v1/vaults"):
+        base = (v.get("base_token") or {}).get("address", "").lower()
+        if base in USDG_ADDRESSES and (v.get("tvl_usd") or 0) >= MIN_SUPPLY_TVL:
+            out.append(v)
+    return out
+
+
+def fetch_gmx_glv():
+    info = get_json("https://arbitrum-api.gmxinfra.io/glvs/info")["glvs"]
+    apy = get_json("https://arbitrum-api.gmxinfra.io/apy?period=7d")["glvs"]
+    for g in info:
+        if g["glvToken"].lower() == GMX_USDG_GLV:
+            tvl = sum(int(m["balanceUsd"]) for m in g["markets"]) / 1e30
+            a = next((v for k, v in apy.items() if k.lower() == GMX_USDG_GLV), {})
+            return {"tvl": tvl, "base": (a.get("baseApy") or 0) * 100, "bonus": (a.get("bonusApr") or 0) * 100}
+    return None
+
+
 def set_apy(row, base=None, reward=None):
     if base is not None:
         row["apyBase"] = r(base)
@@ -348,14 +395,65 @@ def apply_first_party(supply, lend_borrow):
                 row["dataSource"] += " + Loopscale API"
                 break
 
-    # 7. Merkl reward campaigns: authoritative reward APR, end date and eligibility.
+    # 7. Pendle fixed-rate PTs on every chain (Pendle API; DefiLlama misses X Layer / Robinhood).
+    for m in safe("pendle api", fetch_pendle, []):
+        cat, src = SOURCES["pendle-v2"]
+        row = {"id": f"pendle-{m['chainId']}-{m['address']}", "project": "pendle-v2", "protocol": "Pendle",
+               "chain": m["chain"], "symbol": f"PT-USDG-{m['expiry']}", "meta": f"Fixed rate to {m['expiry']}",
+               "category": cat, "source": src, "tvl": round(m["liquidity"]), "apyMean30d": None, "apyPct7D": None,
+               "url": f"https://app.pendle.finance/trade/markets/{m['address']}/swap?view=pt&chain={m['chain'].lower().replace(' ', '')}",
+               "dataSource": "Pendle API", "apyBase": 0, "apyReward": 0, "tvlLabel": "Pool liquidity",
+               "note": "Deposits column is AMM pool liquidity; large buys get a worse fixed rate due to price impact."}
+        set_apy(row, base=m["implied"])
+        supply.append(row)
+
+    # 8. Mellow vaults (Mellow API).
+    for v in safe("mellow api", fetch_mellow, []):
+        row = {"id": "mellow-" + v["id"], "project": "mellow", "protocol": "Mellow", "name": v.get("name"),
+               "chain": {4663: "Robinhood Chain", 1: "Ethereum"}.get(v.get("chain_id"), str(v.get("chain_id"))),
+               "symbol": v.get("symbol"), "meta": None, "category": "Curated vault", "source": SOURCES["mellow"][1],
+               "tvl": round(v["tvl_usd"]), "apyMean30d": None, "apyPct7D": None, "url": "https://app.mellow.finance/vaults/" + v["id"],
+               "dataSource": "Mellow API", "apyBase": 0, "apyReward": 0}
+        set_apy(row, base=v.get("apy") or 0)
+        notes = []
+        if v.get("limit_usd") and v["tvl_usd"] >= 0.97 * v["limit_usd"]:
+            notes.append(f"Deposit cap nearly full ({fmt_usd(v['tvl_usd'])} of {fmt_usd(v['limit_usd'])}).")
+        if v.get("withdraw_avg_time_seconds"):
+            notes.append(f"Withdrawals are queued (average {v['withdraw_avg_time_seconds'] / 86400:.1f} days).")
+        if notes:
+            row["note"] = " ".join(notes)
+        supply.append(row)
+
+    # 9. GMX GLV [USDG-USDG] on Arbitrum (deposit USDG only; GMX API).
+    glv = safe("gmx api", fetch_gmx_glv)
+    if glv:
+        row = {"id": "gmx-glv-usdg", "project": "gmx-glv", "protocol": "GMX", "name": "GLV [USDG-USDG]",
+               "chain": "Arbitrum", "symbol": "GLV", "meta": "Single-asset USDG vault", "category": "Perp liquidity",
+               "source": SOURCES["gmx-glv"][1], "tvl": round(glv["tvl"]), "apyMean30d": None, "apyPct7D": None,
+               "url": "https://app.gmx.io/#/pools", "dataSource": "GMX API", "apyBase": 0, "apyReward": 0}
+        set_apy(row, base=glv["base"], reward=glv["bonus"])
+        supply.append(row)
+
+    # 10. Corrections from the audit.
+    for row in supply:
+        if row["project"] == "arcadia-v2":
+            # DefiLlama's adapter ignores the treasury's 15% share of interest.
+            set_apy(row, base=row["apyBase"] * 0.85)
+            row["note"] = "Adjusted for Arcadia's 15% treasury share of interest (DefiLlama omits it). Small pool; rate swings with utilization."
+        if row["project"] == "flock-credit":
+            row["warning"] = ("Yield is DEX vote rewards from veUP collateral passed to lenders: not sustainable at this level. "
+                              "Pool is ~100% borrowed, so withdrawals depend on repayments.")
+
+    # 11. Merkl reward campaigns: authoritative reward APR, end date and eligibility.
     merkl = safe("merkl api", fetch_merkl, [])
     v4_rows = [x for x in supply if x["project"] == "aave-v4"]
     for o in merkl:
         target = None
         ident = (o.get("identifier") or "").replace("WHITELIST_CAMPAIGN", "").lower()
         explorer = (o.get("explorerAddress") or "").lower()
-        if o.get("type") == "AAVE_V4_HUB_NET_LENDING" and v4_rows and o.get("nativeApr") is not None:
+        if "GLV [USDG-USDG]" in (o.get("name") or "") or "GMX Dollar Vault" in (o.get("name") or ""):
+            target = next((x for x in supply if x["project"] == "gmx-glv"), None)
+        elif o.get("type") == "AAVE_V4_HUB_NET_LENDING" and v4_rows and o.get("nativeApr") is not None:
             # Match the campaign to its hub by native APR (Merkl does not expose the hub address).
             target = min(v4_rows, key=lambda x: abs(x["apyBase"] - o["nativeApr"]))
         else:
@@ -408,6 +506,7 @@ def main():
         by_symbol[(morpho_chain(v["chain"]["network"]), (v["symbol"] or "").upper())] = v
 
     supply, lp = [], []
+    matched_vaults = set()
     for p in pools:
         kind = classify(p)
         if kind is None:
@@ -416,6 +515,8 @@ def main():
         if tvl < (MIN_SUPPLY_TVL if kind == "supply" else MIN_LP_TVL):
             continue
         proj = p["project"]
+        if proj in EXCLUDE_PROJECTS or (proj == "pendle-v2" and (p.get("poolMeta") or "").startswith("For buying PT")):
+            continue
         chain = CHAIN_NAMES.get(p["chain"], p["chain"])
         cat, src = SOURCES.get(proj, LP_SOURCE if kind == "lp" else ("Other", "Supply yield as reported by DefiLlama."))
         if kind == "lp":
@@ -442,6 +543,7 @@ def main():
         if proj == "morpho-blue":
             mv = by_symbol.get((chain, (p.get("symbol") or "").upper()))
             if mv:
+                matched_vaults.add(mv["address"].lower())
                 row["name"] = mv["name"]
                 row["curator"] = ", ".join(c["name"] for c in mv["curators"]["items"]) or None
                 row["performanceFee"] = mv.get("performanceFee")
@@ -464,6 +566,27 @@ def main():
                 if slug:
                     row["url"] = f"https://app.morpho.org/{slug}/vault/{mv['address']}"
         (supply if kind == "supply" else lp).append(row)
+
+    # Morpho vaults DefiLlama does not list (typically unlisted on Morpho's app).
+    for mv in morpho_vaults:
+        if mv["address"].lower() in matched_vaults or (mv.get("totalAssetsUsd") or 0) < MIN_UNLISTED_TVL:
+            continue
+        slug = MORPHO_CHAIN_SLUG.get(mv["chain"]["id"])
+        cat, src = SOURCES["morpho-blue"]
+        row = {
+            "id": "morpho-" + mv["address"], "project": "morpho-blue", "protocol": "Morpho", "name": mv["name"] or mv["symbol"],
+            "chain": morpho_chain(mv["chain"]["network"]), "symbol": mv["symbol"], "meta": None if mv.get("listed") else "Unlisted on Morpho app",
+            "category": cat, "source": src, "tvl": round(mv["totalAssetsUsd"]), "apyMean30d": None, "apyPct7D": None,
+            "curator": ", ".join(c["name"] for c in mv["curators"]["items"]) or None, "performanceFee": mv.get("performanceFee"),
+            "liquidity": round(mv.get("liquidityUsd") or 0), "morphoNetApy": r((mv.get("netApy") or 0) * 100),
+            "url": f"https://app.morpho.org/{slug}/vault/{mv['address']}" if slug else "https://app.morpho.org",
+            "dataSource": "Morpho API", "apyBase": 0, "apyReward": 0,
+        }
+        if not mv.get("listed"):
+            row["warning"] = "Not listed in the Morpho app: no curation review by Morpho. Check the curator and the markets it lends to."
+        set_apy(row, base=(mv.get("apy") or 0) * (1 - (mv.get("performanceFee") or 0)) * 100,
+                reward=sum(rw.get("supplyApr") or 0 for rw in mv.get("rewards") or []) * 100)
+        supply.append(row)
 
     # Direct Morpho Blue markets lending USDG (source of the vault yields).
     for m in morpho_markets:
@@ -494,6 +617,7 @@ def main():
             "url": f"https://app.morpho.org/{slug}/market/{m['marketId']}" if slug else "https://app.morpho.org",
             "dataSource": "Morpho API",
             "excludeFromTotals": True,
+            **({} if m.get("listed") else {"warning": "Unlisted Morpho market: isolated, often fully utilized (withdrawals can be stuck) and backed by thin collateral."}),
         })
 
     lend_borrow = {x["pool"]: x for x in safe("lendBorrow", lambda: get_json("https://yields.llama.fi/lendBorrow"), [])}
@@ -501,7 +625,8 @@ def main():
 
     # APY/TVL history for supply venues from DefiLlama.
     for row in supply:
-        if row["project"] in ("morpho-market", "jupiter-lend", "kamino-vault") or row["tvl"] < MIN_HISTORY_TVL:
+        # Only DefiLlama pools (UUID ids) have history.
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", row["id"]) or row["tvl"] < MIN_HISTORY_TVL:
             continue
         try:
             hist = get_json(f"https://yields.llama.fi/chart/{row['id']}")["data"][-HISTORY_DAYS:]
