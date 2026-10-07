@@ -224,10 +224,11 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; line-height: 1.
   <div id="panel-sources" class="sources-grid" hidden></div>
 
   <footer>
-    Data: <a href="https://defillama.com/yields?token=USDG" target="_blank" rel="noopener">DefiLlama Yields</a> (APY, TVL, 90-day history) and the
-    <a href="https://api.morpho.org/graphql" target="_blank" rel="noopener">Morpho API</a> (vault curators, direct Morpho Blue markets).
-    Refreshed automatically by a GitHub Action. APY = base (organic interest/fees) + rewards (token incentives, which can end at any time).
-    "Morpho Blue market" rows show where vault deposits are lent out, so their TVL is excluded from totals to avoid double counting.
+    Data: protocol APIs where available (Aave V4, Maple, Jupiter, Kamino vaults, Morpho), <a href="https://merkl.xyz" target="_blank" rel="noopener">Merkl</a> for reward campaigns (end dates, eligibility),
+    and <a href="https://defillama.com/yields?token=USDG" target="_blank" rel="noopener">DefiLlama Yields</a> for everything else plus 90-day history. "Deposits" = total supplied, not just unborrowed cash.
+    Refreshed automatically by a GitHub Action. APY = base (organic interest/fees) + rewards open to any on-chain depositor (incentives can end at any time; end dates shown when known).
+    Rewards restricted to specific users (e.g. Robinhood App) are shown separately and not included in the headline APY.
+    "Morpho Blue market" and "Kamino Vault" rows overlap with other rows (a vault's deposits sit in the markets/reserves), so they are excluded from totals to avoid double counting.
     Not investment advice; check each protocol's risks before depositing.
   </footer>
 </div>
@@ -353,13 +354,13 @@ function renderKpis(rows) {
   $("#kpis").innerHTML = [
     ["Best " + label + " (TVL ≥ $1M)", big ? fmtPct(apyOf(big)) : "–", big ? shortLabel(big) + " · " + big.chain : "no venue"],
     ["TVL-weighted " + label, fmtPct(wavg), "across tracked supply venues"],
-    ["USDG supplied (tracked)", fmtUsd(tvl), "excludes direct Morpho markets"],
+    ["USDG supplied (tracked)", fmtUsd(tvl), "excludes vaults' underlying markets"],
     ["Venues", counted.length, `${protos} protocols · ${chains} chains`],
   ].map(([l, v, f]) => `<div class="card kpi"><div class="label">${l}</div><div class="value">${v}</div><div class="foot" title="${esc(f)}">${esc(f)}</div></div>`).join("");
 }
 
 function renderBars(rows) {
-  const top = rows.filter(r => !r.excludeFromTotals).sort((a, b) => apyOf(b) - apyOf(a)).slice(0, 14);
+  const top = rows.slice().sort((a, b) => apyOf(b) - apyOf(a)).slice(0, 14);
   if (!top.length) { $("#bars").innerHTML = '<div class="empty">No venues match these filters</div>'; return; }
   const max = Math.max(...top.map(apyOf));
   const step = max > 40 ? 20 : max > 16 ? 5 : max > 6 ? 2 : 1;
@@ -418,7 +419,7 @@ const COLS = {
     ["category", "Type", r => r.category, "hide-sm"],
     ["apy", "APY", apyOf, "num"],
     ["trend", "30d APY", r => r.apyMean30d ?? -1, "num hide-sm"],
-    ["tvl", "TVL", r => r.tvl, "num"],
+    ["tvl", "Deposits", r => r.tvl, "num"],
   ],
   lp: [
     ["venue", "Pool", r => r.protocol],
@@ -429,6 +430,13 @@ const COLS = {
     ["tvl", "TVL", r => r.tvl, "num"],
   ],
 };
+
+function rewardEndLabel(end) {
+  const days = (new Date(end.replace(" UTC", "Z").replace(" ", "T")) - Date.now()) / 864e5;
+  if (days > 30) return "";
+  const txt = days <= 0 ? "rewards ended" : "rewards end " + fmtDate(end.slice(0, 10));
+  return `<span class="split ${days < 7 ? "delta-down" : ""}" title="Reward campaign end date">⏱ ${txt}</span>`;
+}
 
 function sparkline(hist) {
   if (!hist || hist.length < 3) return "";
@@ -452,13 +460,15 @@ function renderTable(rows, kind) {
     const d7 = r.apyPct7D;
     const delta = d7 == null || Math.abs(d7) < 0.01 ? "" : `<span class="${d7 > 0 ? "delta-up" : "delta-down"}" title="7-day APY change">${d7 > 0 ? "▲" : "▼"} ${Math.abs(d7).toFixed(2)}</span>`;
     const high = apyOf(r) > 25 ? '<span class="warn" title="Unusually high APY — usually thin TVL or temporary incentives">⚠</span>' : "";
+    const ends = r.rewardEnds && r.apyReward && !state.baseOnly ? rewardEndLabel(r.rewardEnds) : "";
+    const restricted = r.restrictedReward && !state.baseOnly ? `<span class="split" title="${esc(r.restrictedNote)}">+${fmtPct(r.restrictedReward)} · ${esc(r.restrictedLabel || "eligible users only")}</span>` : "";
     const sub = [r.name && r.meta ? r.meta : null, r.name ? null : r.meta, r.curator ? "Curator: " + r.curator : null, kind === "lp" ? null : (r.symbol !== "USDG" ? r.symbol : null)].filter(Boolean).join(" · ");
     const title = r.name || (kind === "lp" ? r.symbol : r.protocol);
     let tr = `<tr class="row" data-id="${esc(id)}">
       <td class="venue"><b>${esc(kind === "lp" ? r.protocol : title)}</b>${kind !== "lp" && r.name ? ` <span style="color:var(--muted)">${esc(r.protocol)}</span>` : ""}<span class="m">${esc(sub || "—")}</span></td>
       <td>${esc(r.chain)}</td>
       <td class="hide-sm">${kind === "lp" ? esc(r.symbol) : `<span class="pill">${esc(r.category)}</span>`}</td>
-      <td class="num"><span class="apy">${fmtPct(apyOf(r))}</span>${high}<span class="split">${state.baseOnly ? "base only" : `${fmtPct(r.apyBase)} base${r.apyReward ? " + " + fmtPct(r.apyReward) + " rewards" : ""}`}</span></td>
+      <td class="num"><span class="apy">${fmtPct(apyOf(r))}</span>${high}<span class="split">${state.baseOnly ? "base only" : `${fmtPct(r.apyBase)} base${r.apyReward ? " + " + fmtPct(r.apyReward) + " rewards" : ""}`}</span>${ends}${restricted}</td>
       <td class="num hide-sm">${sparkline(r.history)}${r.apyMean30d != null ? fmtPct(r.apyMean30d) : "–"} ${delta}</td>
       <td class="num">${fmtUsd(r.tvl)}</td></tr>`;
     if (state.open === id) tr += `<tr><td class="detail" colspan="${cols.length}">${detailHtml(r)}</td></tr>`;
@@ -485,19 +495,25 @@ function detailHtml(r) {
     r.performanceFee != null && ["Performance fee", (r.performanceFee * 100).toFixed(0) + "%"],
     r.liquidity != null && ["Withdrawable liquidity", fmtUsd(r.liquidity)],
     r.idleShare != null && ["Idle (not lent out)", fmtPct(r.idleShare, 1)],
+    r.available != null && ["Available liquidity", fmtUsd(r.available)],
+    r.spotApy != null && ["Spot APY", fmtPct(r.spotApy)],
+    r.rewardEnds && ["Reward campaign ends", r.rewardEnds],
     r.utilization != null && ["Utilization", fmtPct(r.utilization)],
     r.borrowApy != null && ["Borrow APY", fmtPct(r.borrowApy)],
     ["Base APY", fmtPct(r.apyBase)], ["Reward APY", fmtPct(r.apyReward)],
     r.morphoNetApy != null && ["Morpho-reported net APY", fmtPct(r.morphoNetApy)],
     r.llamaApy != null && ["DefiLlama-reported APY", fmtPct(r.llamaApy)],
-    ["TVL", fmtUsd(r.tvl)], ["Data source", r.dataSource],
+    ["Deposits", fmtUsd(r.tvl)], ["Data source", r.dataSource],
   ].filter(Boolean);
   return `<div class="detail-grid"><div>
       <h3>Where the yield comes from</h3><p>${esc(r.source)}</p>
+      ${r.rewardNote ? `<p><b>Rewards:</b> ${esc(r.rewardNote)}</p>` : ""}
+      ${r.restrictedNote ? `<p><b>Restricted reward (+${fmtPct(r.restrictedReward)}, not in headline APY):</b> ${esc(r.restrictedNote)} Eligibility: ${esc(r.restrictedLabel || "restricted")}.</p>` : ""}
       <dl class="kv">${kv.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
       <p style="margin-top:12px"><a href="${esc(r.url)}" target="_blank" rel="noopener">Open ${r.dataSource === "DefiLlama" && !r.url.includes("morpho") ? "on DefiLlama" : "on Morpho"} ↗</a></p>
     </div><div>
       <h3>APY, last ${r.history ? r.history.length : 0} days</h3>
+      ${r.historyIncludesRestricted ? '<p>History is from DefiLlama and includes the restricted reward.</p>' : ""}
       ${r.history && r.history.length > 1 ? '<div class="chartbox" id="hist"></div>' : '<p>No history available for this venue.</p>'}
     </div></div>`;
 }
@@ -532,7 +548,7 @@ function drawHistory(el, hist) {
     xh.setAttribute("x1", x(i)); xh.setAttribute("x2", x(i)); xh.setAttribute("visibility", "visible");
     xd.setAttribute("cx", x(i)); xd.setAttribute("cy", y(h[1] ?? 0)); xd.setAttribute("visibility", "visible");
     tip.style.display = "block";
-    tip.innerHTML = `<div style="color:var(--muted)">${fmtDate(h[0], true)}</div><div>APY <b>${fmtPct(h[1])}</b></div><div>TVL <b>${fmtUsd(h[2])}</b></div>`;
+    tip.innerHTML = `<div style="color:var(--muted)">${fmtDate(h[0], true)}</div><div>APY <b>${fmtPct(h[1])}</b></div><div>TVL (DefiLlama) <b>${fmtUsd(h[2])}</b></div>`;
     const left = x(i) / W * rect.width;
     tip.style.left = Math.min(Math.max(left + 12, 0), rect.width - tip.offsetWidth) + "px";
     tip.style.top = "4px";
