@@ -9,7 +9,7 @@ A dashboard of supply-side yields for **USDG (Paxos Global Dollar)** across chai
 - `scripts/fetch_yields.py` pulls data from:
   - [DefiLlama Yields](https://yields.llama.fi/pools): every pool whose underlying token is USDG, plus 90-day APY/TVL history per venue
   - [Morpho API](https://api.morpho.org/graphql): vault curators, fees, and liquidity, plus the Morpho Blue markets where vault deposits are lent out
-- The script writes `docs/data/yields.json`. A GitHub Action (`.github/workflows/update-yields.yml`) runs it every 30 minutes and commits the result.
+- The script writes `docs/data/yields.json`. A GitHub Action (`.github/workflows/update-yields.yml`) keeps it running every 30 minutes (a self-chaining loop, with a cron schedule as backup) and commits the result.
 - `docs/index.html` is a static, dependency-free dashboard served by GitHub Pages.
 
 Pools are split into:

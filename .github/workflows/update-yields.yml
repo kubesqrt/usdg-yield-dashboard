@@ -1,12 +1,16 @@
 name: Update USDG yields
 
+# GitHub's cron is best-effort (often late or skipped), so each run keeps refreshing every
+# 30 minutes for ~5.5 hours, then dispatches its own successor. The schedule below is only a
+# backup that restarts the loop if the chain ever breaks. Concurrency keeps one loop at a time.
 on:
   schedule:
-    - cron: "7,37 * * * *"   # every 30 minutes
+    - cron: "7,37 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: update-yields
@@ -15,19 +19,35 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Fetch yields
-        run: python scripts/fetch_yields.py
-      - name: Commit data
+      - name: Refresh every 30 minutes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/data/yields.json
-          git diff --cached --quiet && exit 0
-          git commit -m "data: refresh USDG yields"
-          git pull --rebase -X theirs origin main
-          git push
+          deadline=$((SECONDS + 330 * 60))
+          while true; do
+            started=$SECONDS
+            git pull -q --rebase -X theirs origin main || git rebase --abort || true
+            if python scripts/fetch_yields.py; then
+              git add docs/data/yields.json
+              if ! git diff --cached --quiet; then
+                git commit -q -m "data: refresh USDG yields"
+                git pull -q --rebase -X theirs origin main && git push -q || echo "push failed; will retry next cycle"
+              fi
+            else
+              echo "fetch failed; keeping previous data"
+            fi
+            next=$((started + 30 * 60))
+            if [ $next -ge $deadline ]; then break; fi
+            sleep $((next - SECONDS > 0 ? next - SECONDS : 0))
+          done
+      - name: Start the next run
+        if: success() || failure()   # not when cancelled, so cancelling a run stops the loop
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run update-yields.yml --ref main -R "$GITHUB_REPOSITORY"

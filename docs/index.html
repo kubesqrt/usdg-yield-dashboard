@@ -281,7 +281,7 @@ async function load() {
     return;
   }
   const ageH = (Date.now() - new Date(state.data.updated)) / 36e5;
-  $("#updated").innerHTML = `<span class="dot ${ageH > 6 ? "stale" : ""}"></span>Updated ${timeAgo(state.data.updated)}`;
+  $("#updated").innerHTML = `<span class="dot ${ageH > 1.5 ? "stale" : ""}"></span>Updated ${timeAgo(state.data.updated)}`;
   $("#updated").title = new Date(state.data.updated).toLocaleString();
   if (!state.built) { buildFilters(); state.built = true; }
   render();
