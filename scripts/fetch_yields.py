@@ -78,7 +78,7 @@ SOURCES = {
     "kamino-lend": ("Lending", "Borrower interest in a specific Kamino isolated market on Solana. Rate depends on each market's collateral (SOL/BTC, OnRe, reUSD, JLP...) and utilization."),
     "spark-savings": ("Savings", "Spark savings vault: USDG deployed by Spark's allocation system, paying a rate tied to the Sky Savings Rate."),
     "tydro": ("Lending", "Aave-fork lending market on Ink; yield is interest paid by USDG borrowers."),
-    "loopscale-lending": ("Lending", "Loopscale order-book lending vaults on Solana; lenders earn fixed/variable interest from matched borrowers, plus occasional incentives."),
+    "loopscale-lending": ("Lending", "Loopscale vault on Solana: USDG is lent to borrowers against specific collateral (e.g. tokenized credit funds PRIME/HINC/ACRED, OnRe's ONyc reinsurance token, Orca market makers/xStocks). Rates are set by the vault curator and can be changed at any time, not by a utilization curve. Plus occasional reward emissions."),
     "sentora-curator": ("Curated vault", "Sentora-curated Kamino vault that allocates USDG across Kamino lending markets (here the Ethena market)."),
     "pendle-v2": ("Fixed rate", "Buy PT-USDG at a discount and redeem 1:1 at maturity: a fixed yield locked until the expiry date (price risk if sold early)."),
     "project-0": ("Lending", "Borrower interest from Project 0 (marginfi successor) lending pool on Solana."),
@@ -171,7 +171,7 @@ def morpho_chain(name):
     return {"Arbitrum One": "Arbitrum", "Ethereum": "Ethereum"}.get(name, name)
 
 
-MORPHO_CHAIN_SLUG = {1: "ethereum", 42161: "arbitrum", 8453: "base", 4663: "robinhood"}
+MORPHO_CHAIN_SLUG = {1: "ethereum", 42161: "arbitrum", 8453: "base", 4663: "robinhood-chain"}
 
 USDG_SOLANA = "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"
 USDG_ETH = "0xe343167631d89b6ffc58b88d6b7fb0228795491d"
@@ -270,13 +270,18 @@ def fetch_loopscale():
                 continue
             idle = int(st.get("tokenBalance") or 0) / 1e6
             total = idle + (int(st.get("currentDeployedAmount") or 0) + int(st.get("outstandingInterestAmount") or 0)) / 1e6
-            out.append({"name": (v.get("vaultMetadata") or {}).get("name") or "Loopscale vault", "idle": idle, "total": total})
+            now = time.time()
+            ends = [int(float(x.get("rewardEndTime") or 0)) for x in v.get("vaultRewardsSchedules") or []
+                    if int(float(x.get("rewardEndTime") or 0)) > now]
+            out.append({"name": (v.get("vaultMetadata") or {}).get("name") or "Loopscale vault", "idle": idle, "total": total,
+                        "address": (v.get("vault") or {}).get("address"), "rewardEnd": max(ends) if ends else None})
         if not d.get("hasMore"):
             break
     return out
 
 
 PENDLE_CHAINS = {1: "Ethereum", 196: "X Layer", 4663: "Robinhood Chain"}
+PENDLE_APP_CHAIN = {1: "ethereum", 196: "xlayer", 4663: "robinhood"}
 GMX_USDG_GLV = "0x4cd5a94a30876320ac65f2e192493ee476f13866"
 
 
@@ -310,6 +315,52 @@ def fetch_gmx_glv():
             a = next((v for k, v in apy.items() if k.lower() == GMX_USDG_GLV), {})
             return {"tvl": tvl, "base": (a.get("baseApy") or 0) * 100, "bonus": (a.get("bonusApr") or 0) * 100}
     return None
+
+
+AAVE_V3_MARKETS = {"Ethereum": ("proto_mainnet_v3", USDG_ETH),
+                   "X Layer": ("proto_xlayer_v3", "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8")}
+PROTOCOL_HOMEPAGES = {"flock-credit": "https://www.ravenhood.xyz/flock-credit"}
+
+
+def fetch_kamino_reserves():
+    """Kamino market name -> (market address, USDG reserve address), for deep links."""
+    out = {}
+    for m in get_json("https://api.kamino.finance/v2/kamino-market"):
+        try:
+            res = get_json(f"https://api.kamino.finance/kamino-market/{m['lendingMarket']}/reserves/metrics?env=mainnet-beta")
+        except Exception:  # noqa: BLE001
+            continue
+        for x in res:
+            if x.get("liquidityTokenMint") == USDG_SOLANA:
+                out[m["name"]] = (m["lendingMarket"], x["reserve"])
+        time.sleep(0.1)
+    return out
+
+
+ROBINHOOD_RPC = "https://robinhood.drpc.org"
+ARCADIA_USDG_TRANCHE = "0xa5e1e1f92a244f192943899eb5810e2bab372ea4"
+
+
+def rpc(url, method, params):
+    res = get_json(url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+    if "result" not in res:
+        raise RuntimeError(res.get("error"))
+    return res["result"]
+
+
+def erc4626_realised_apr(url, vault, days):
+    """Annualised share-price growth of an ERC-4626 vault over the last `days` days (simple APR, %)."""
+    dec = int(rpc(url, "eth_call", [{"to": vault, "data": "0x313ce567"}, "latest"]), 16)
+    head = rpc(url, "eth_getBlockByNumber", ["latest", False])
+    bn, ts = int(head["number"], 16), int(head["timestamp"], 16)
+    probe = rpc(url, "eth_getBlockByNumber", [hex(bn - 100_000), False])
+    block_time = (ts - int(probe["timestamp"], 16)) / 100_000
+    old = bn - int(days * 86400 / block_time)
+    t0 = int(rpc(url, "eth_getBlockByNumber", [hex(old), False])["timestamp"], 16)
+    data = "0x07a2d13a" + hex(10 ** dec)[2:].rjust(64, "0")  # convertToAssets(1 share)
+    a1 = int(rpc(url, "eth_call", [{"to": vault, "data": data}, hex(bn)]), 16)
+    a0 = int(rpc(url, "eth_call", [{"to": vault, "data": data}, hex(old)]), 16)
+    return (a1 / a0 - 1) * 365 * 86400 / (ts - t0) * 100
 
 
 def set_apy(row, base=None, reward=None):
@@ -360,7 +411,7 @@ def apply_first_party(supply, lend_borrow):
             "chain": "Solana", "symbol": "jlUSDG", "meta": "Earn", "category": SOURCES["jupiter-lend"][0],
             "source": SOURCES["jupiter-lend"][1], "tvl": round(jup["tvl"]), "apy": r(jup["base"] + jup["reward"]),
             "apyBase": r(jup["base"]), "apyReward": r(jup["reward"]), "apyMean30d": None, "apyPct7D": None,
-            "url": "https://jup.ag/lend/earn", "dataSource": "Jupiter API"})
+            "url": "https://jup.ag/lend/earn/USDG/deposit", "dataSource": "Jupiter API"})
 
     # 5. Kamino vaults (Kamino API) replace DefiLlama's single curator row. They allocate into the
     #    Kamino reserves listed above, so they are excluded from totals.
@@ -374,7 +425,7 @@ def apply_first_party(supply, lend_borrow):
                 "name": v["name"], "chain": "Solana", "symbol": "USDG", "meta": None,
                 "category": "Curated vault", "source": SOURCES["kamino-vault"][1], "tvl": round(v["tvl"]),
                 "apyMean30d": r(v["apy30d"]), "apyPct7D": None, "available": round(v["available"]),
-                "performanceFee": v["perfFee"], "url": f"https://app.kamino.finance/earn/lend/{v['address']}",
+                "performanceFee": v["perfFee"], "url": f"https://kamino.com/earn/lend/{v['address']}",
                 "dataSource": "Kamino API", "excludeFromTotals": True, "apyBase": 0, "apyReward": 0,
             }
             set_apy(row, base=v["base"], reward=v["reward"])
@@ -388,12 +439,18 @@ def apply_first_party(supply, lend_borrow):
     for row in supply:
         if row["project"] != "loopscale-lending":
             continue
-        for v in vaults:
-            if abs(v["idle"] - row["tvl"]) <= max(0.01 * row["tvl"], 50):
-                row["available"], row["tvl"] = row["tvl"], round(v["total"])
-                row["name"] = v["name"]
-                row["dataSource"] += " + Loopscale API"
-                break
+        # DefiLlama's snapshot can lag the API, so take the closest idle balance within 20%.
+        cands = [v for v in vaults if abs(v["idle"] - row["tvl"]) <= max(0.2 * row["tvl"], 50)]
+        for v in sorted(cands, key=lambda v: abs(v["idle"] - row["tvl"]))[:1]:
+            vaults.remove(v)
+            row["available"], row["tvl"] = row["tvl"], round(v["total"])
+            row["name"] = v["name"]
+            if v.get("address"):
+                row["url"] = f"https://app.loopscale.com/vault/{v['address']}"
+            row["dataSource"] += " + Loopscale API"
+            if v.get("rewardEnd") and row["apyReward"]:
+                row["rewardEnds"] = datetime.fromtimestamp(v["rewardEnd"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                row["rewardNote"] = f"Loopscale vault reward emissions, scheduled to end {row['rewardEnds']}."
 
     # 7. Pendle fixed-rate PTs on every chain (Pendle API; DefiLlama misses X Layer / Robinhood).
     for m in safe("pendle api", fetch_pendle, []):
@@ -401,7 +458,7 @@ def apply_first_party(supply, lend_borrow):
         row = {"id": f"pendle-{m['chainId']}-{m['address']}", "project": "pendle-v2", "protocol": "Pendle",
                "chain": m["chain"], "symbol": f"PT-USDG-{m['expiry']}", "meta": f"Fixed rate to {m['expiry']}",
                "category": cat, "source": src, "tvl": round(m["liquidity"]), "apyMean30d": None, "apyPct7D": None,
-               "url": f"https://app.pendle.finance/trade/markets/{m['address']}/swap?view=pt&chain={m['chain'].lower().replace(' ', '')}",
+               "url": f"https://app.pendle.finance/trade/markets/{m['address']}/swap?view=pt&chain={PENDLE_APP_CHAIN[m['chainId']]}",
                "dataSource": "Pendle API", "apyBase": 0, "apyReward": 0, "tvlLabel": "Pool liquidity",
                "note": "Deposits column is AMM pool liquidity; large buys get a worse fixed rate due to price impact."}
         set_apy(row, base=m["implied"])
@@ -436,15 +493,48 @@ def apply_first_party(supply, lend_borrow):
 
     # 10. Corrections from the audit.
     for row in supply:
-        if row["project"] == "arcadia-v2":
-            # DefiLlama's adapter ignores the treasury's 15% share of interest.
-            set_apy(row, base=row["apyBase"] * 0.85)
-            row["note"] = "Adjusted for Arcadia's 15% treasury share of interest (DefiLlama omits it). Small pool; rate swings with utilization."
+        if row["project"] == "arcadia-v2" and row["chain"] == "Robinhood Chain":
+            # DefiLlama's adapter ignores the treasury's share of interest. Use the lender tranche's
+            # realised 7-day share-price growth on-chain instead (matches Arcadia's own app).
+            realised = safe("arcadia onchain", lambda: erc4626_realised_apr(ROBINHOOD_RPC, ARCADIA_USDG_TRANCHE, 7))
+            if realised is not None:
+                set_apy(row, base=realised)
+                row["dataSource"] = "On-chain (7-day realised)"
+                row["note"] = "Rate = lenders' realised share-price growth over the last 7 days, read on-chain. Small pool; rate swings with utilization."
+            else:
+                set_apy(row, base=row["apyBase"] * 0.85)
+                row["note"] = "Estimate: DefiLlama rate less Arcadia's 15% treasury share (on-chain read failed this run)."
+            row["url"] = "https://arcadia.finance/pool/4663/0xf37c0C5996503Fdd2b5CCCE36E659cD30393AE59"
+            row.pop("linkNote", None)
         if row["project"] == "flock-credit":
             row["warning"] = ("Yield is DEX vote rewards from veUP collateral passed to lenders: not sustainable at this level. "
                               "Pool is ~100% borrowed, so withdrawals depend on repayments.")
 
-    # 11. Merkl reward campaigns: authoritative reward APR, end date and eligibility.
+    # 11. Deep links to each protocol's own page showing this rate (verified by hand 2026-10-07).
+    kamino_reserves = safe("kamino markets api", fetch_kamino_reserves, {})
+    for row in supply:
+        proj, chain = row["project"], row["chain"]
+        if proj == "aave-v3" and chain in AAVE_V3_MARKETS:
+            market, asset = AAVE_V3_MARKETS[chain]
+            row["url"] = f"https://app.aave.com/reserve-overview/?underlyingAsset={asset}&marketName={market}"
+        elif proj == "aave-v4":
+            row["url"] = "https://pro.aave.com/explore/token/USDG?chain=1"
+            spokes = {"Core hub": "'Main'", "Global Dollar hub": "'Maple syrupUSDG' or 'PAXG Gold'"}.get(row.get("meta"), "")
+            row["linkNote"] = f"Deposit through the {spokes} market on Aave's page; its APY includes rewards." if spokes else ""
+        elif proj == "tydro":
+            row["url"] = f"https://app.tydro.com/reserve-overview/?underlyingAsset={USDG_ETH}&marketName=proto_ink_v3"
+        elif proj == "maple":
+            row["linkNote"] = "Maple's app shows one blended rate for syrupUSDC/USDT/USDG; the USDG-only rate here is from Maple's API."
+        elif proj == "kamino-lend" and row.get("meta") in kamino_reserves:
+            market, reserve = kamino_reserves[row["meta"]]
+            row["url"] = f"https://kamino.com/borrow/reserve/{market}/{reserve}"
+        elif proj == "spark-savings" and chain == "Robinhood Chain":
+            row["url"] = "https://app.spark.finance/savings/robinhood/spusdg"
+        elif proj in PROTOCOL_HOMEPAGES and "defillama.com" in row["url"]:
+            row["url"] = PROTOCOL_HOMEPAGES[proj]
+            row["linkNote"] = "Opens the protocol's page for this market (it has no per-pool URL)."
+
+    # 12. Merkl reward campaigns: authoritative reward APR, end date and eligibility.
     merkl = safe("merkl api", fetch_merkl, [])
     v4_rows = [x for x in supply if x["project"] == "aave-v4"]
     for o in merkl:
@@ -460,7 +550,7 @@ def apply_first_party(supply, lend_borrow):
             for row in supply:
                 if row["project"] == "morpho-market":
                     continue
-                if ident and ident.startswith("0x") and ident in row["url"].lower():
+                if ident and ident.startswith("0x") and ident not in USDG_ADDRESSES and ident in row["url"].lower():
                     target = row
                 elif o.get("type") == "AAVE_NET_LENDING" and o.get("chainId") == 57073 and row["project"] == "tydro":
                     target = row
@@ -538,6 +628,7 @@ def main():
             "apyPct7D": r(p.get("apyPct7D")),
             "rewardTokens": p.get("rewardTokens") or [],
             "url": f"https://defillama.com/yields/pool/{p['pool']}",
+            "llamaUrl": f"https://defillama.com/yields/pool/{p['pool']}",
             "dataSource": "DefiLlama",
         }
         if proj == "morpho-blue":

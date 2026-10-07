@@ -93,7 +93,7 @@ label.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(-
 
 .grid2 { display: grid; grid-template-columns: 1.6fr 1fr; gap: 12px; margin-bottom: 12px; }
 #bars { padding: 10px 18px 16px; }
-.barrow { display: grid; grid-template-columns: minmax(120px, 210px) 1fr 56px; gap: 10px; align-items: center; height: 26px; cursor: default; }
+.barrow { display: grid; grid-template-columns: minmax(120px, 210px) 1fr 56px; gap: 10px; align-items: center; height: 26px; cursor: pointer; }
 .barrow:hover .barlabel { color: var(--ink); }
 .barlabel { font-size: 12px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .barlabel b { color: var(--ink); font-weight: 550; }
@@ -127,6 +127,9 @@ tbody tr:last-child td { border-bottom: none; }
 .venue .m { color: var(--muted); font-size: 12px; display: block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
 .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--border); }
 .apy { font-weight: 650; font-size: 15px; }
+a.apylink { color: var(--ink); text-decoration: none; position: relative; }
+a.apylink .ext { font-size: 11px; color: var(--accent); margin-left: 3px; vertical-align: 2px; }
+a.apylink:hover { color: var(--accent); text-decoration: underline; }
 .split { color: var(--muted); font-size: 11px; display: block; }
 .delta-up { color: var(--good); }
 .delta-down { color: var(--bad); }
@@ -377,7 +380,7 @@ function renderBars(rows) {
     const total = apyOf(r);
     const bw = Math.max(base, 0) / axisMax * 100, rw = Math.max(rew, 0) / axisMax * 100;
     return `<div class="barrow" data-i="${i}">
-      <div class="barlabel" title="${esc(shortLabel(r))}"><b>${esc(r.protocol)}</b> ${esc(r.name || r.meta || "")} <span style="color:var(--muted)">· ${esc(r.chain)}</span></div>
+      <div class="barlabel"><b>${esc(r.protocol)}</b> ${esc(r.name || r.meta || "")} <span style="color:var(--muted)">· ${esc(r.chain)}</span></div>
       <div class="bartrack">${grid}<div class="barfill" style="width:calc(${Math.min(bw + rw, 100)}% )">
         ${bw > 0 ? `<span style="width:${bw / (bw + rw) * 100}%;background:var(--s1)"></span>` : ""}
         ${rw > 0 ? `<span style="width:${rw / (bw + rw) * 100}%;background:var(--s2)"></span>` : ""}
@@ -392,11 +395,13 @@ function renderBars(rows) {
       tip.style.display = "block";
       tip.innerHTML = `<div style="font-weight:600">${esc(shortLabel(r))}</div><div style="color:var(--muted)">${esc(r.chain)} · TVL ${fmtUsd(r.tvl)}</div>
         <div><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--s1);margin-right:5px"></i>Base <b>${fmtPct(r.apyBase)}</b></div>
-        ${state.baseOnly ? "" : `<div><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--s2);margin-right:5px"></i>Rewards <b>${fmtPct(r.apyReward)}</b></div>`}`;
+        ${state.baseOnly ? "" : `<div><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--s2);margin-right:5px"></i>Rewards <b>${fmtPct(r.apyReward)}</b></div>`}
+        <div style="margin-top:4px;color:var(--accent)">Click to see this rate on ${esc(hostOf(r.url))} ↗</div>`;
       const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8);
       tip.style.left = x + "px"; tip.style.top = (e.clientY + 14) + "px";
     };
     el.onmouseleave = () => tip.style.display = "none";
+    el.onclick = () => window.open(r.url, "_blank", "noopener");
   });
 }
 
@@ -433,6 +438,10 @@ const COLS = {
     ["tvl", "TVL", r => r.tvl, "num"],
   ],
 };
+
+function hostOf(u) {
+  try { return new URL(u).hostname.replace(/^(www|app)\./, ""); } catch (e) { return "source"; }
+}
 
 function rewardEndLabel(end) {
   const days = (new Date(end.replace(" UTC", "Z").replace(" ", "T")) - Date.now()) / 864e5;
@@ -471,7 +480,7 @@ function renderTable(rows, kind) {
       <td class="venue"><b>${esc(kind === "lp" ? r.protocol : title)}</b>${kind !== "lp" && r.name ? ` <span style="color:var(--muted)">${esc(r.protocol)}</span>` : ""}<span class="m">${esc(sub || "—")}</span></td>
       <td>${esc(r.chain)}</td>
       <td class="hide-sm">${kind === "lp" ? esc(r.symbol) : `<span class="pill">${esc(r.category)}</span>`}</td>
-      <td class="num"><span class="apy">${fmtPct(apyOf(r))}</span>${high}<span class="split">${state.baseOnly ? "base only" : `${fmtPct(r.apyBase)} base${r.apyReward ? " + " + fmtPct(r.apyReward) + " rewards" : ""}`}</span>${ends}${restricted}</td>
+      <td class="num"><a class="apy apylink" href="${esc(r.url)}" target="_blank" rel="noopener" aria-label="Open on ${esc(hostOf(r.url))}">${fmtPct(apyOf(r))}<span class="ext">↗</span></a>${high}<span class="split">${state.baseOnly ? "base only" : `${fmtPct(r.apyBase)} base${r.apyReward ? " + " + fmtPct(r.apyReward) + " rewards" : ""}`}</span>${ends}${restricted}</td>
       <td class="num hide-sm">${sparkline(r.history)}${r.apyMean30d != null ? fmtPct(r.apyMean30d) : "–"} ${delta}</td>
       <td class="num">${fmtUsd(r.tvl)}</td></tr>`;
     if (state.open === id) tr += `<tr><td class="detail" colspan="${cols.length}">${detailHtml(r)}</td></tr>`;
@@ -483,6 +492,7 @@ function renderTable(rows, kind) {
     state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : (k === "venue" || k === "chain" || k === "category" || k === "symbol" ? 1 : -1) };
     render();
   });
+  document.querySelectorAll("#panel-table a.apylink").forEach(a => a.onclick = e => e.stopPropagation());
   document.querySelectorAll("#panel-table tr.row").forEach(tr => tr.onclick = () => {
     state.open = state.open === tr.dataset.id ? null : tr.dataset.id;
     render();
@@ -515,7 +525,8 @@ function detailHtml(r) {
       ${r.rewardNote ? `<p><b>Rewards:</b> ${esc(r.rewardNote)}</p>` : ""}
       ${r.restrictedNote ? `<p><b>Restricted reward (+${fmtPct(r.restrictedReward)}, not in headline APY):</b> ${esc(r.restrictedNote)} Eligibility: ${esc(r.restrictedLabel || "restricted")}.</p>` : ""}
       <dl class="kv">${kv.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
-      <p style="margin-top:12px"><a href="${esc(r.url)}" target="_blank" rel="noopener">Open on ${esc(new URL(r.url).hostname.replace(/^(www|app)\./, ""))} ↗</a></p>
+      <p style="margin-top:12px"><a href="${esc(r.url)}" target="_blank" rel="noopener">See this rate on ${esc(hostOf(r.url))} ↗</a>${r.llamaUrl && r.llamaUrl !== r.url ? ` · <a href="${esc(r.llamaUrl)}" target="_blank" rel="noopener">DefiLlama ↗</a>` : ""}</p>
+      ${r.linkNote ? `<p style="font-size:12px">${esc(r.linkNote)}</p>` : ""}
     </div><div>
       <h3>APY, last ${r.history ? r.history.length : 0} days</h3>
       ${r.historyIncludesRestricted ? '<p>History is from DefiLlama and includes the restricted reward.</p>' : ""}
