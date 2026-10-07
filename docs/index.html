@@ -484,10 +484,12 @@ function detailHtml(r) {
     r.curator && ["Curator", r.curator],
     r.performanceFee != null && ["Performance fee", (r.performanceFee * 100).toFixed(0) + "%"],
     r.liquidity != null && ["Withdrawable liquidity", fmtUsd(r.liquidity)],
+    r.idleShare != null && ["Idle (not lent out)", fmtPct(r.idleShare, 1)],
     r.utilization != null && ["Utilization", fmtPct(r.utilization)],
     r.borrowApy != null && ["Borrow APY", fmtPct(r.borrowApy)],
     ["Base APY", fmtPct(r.apyBase)], ["Reward APY", fmtPct(r.apyReward)],
     r.morphoNetApy != null && ["Morpho-reported net APY", fmtPct(r.morphoNetApy)],
+    r.llamaApy != null && ["DefiLlama-reported APY", fmtPct(r.llamaApy)],
     ["TVL", fmtUsd(r.tvl)], ["Data source", r.dataSource],
   ].filter(Boolean);
   return `<div class="detail-grid"><div>

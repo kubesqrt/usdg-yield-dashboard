@@ -141,7 +141,7 @@ def fetch_morpho():
     try:
         d = morpho_query(
             "{ vaultV2s(first:100, where:{assetAddress_in:%s, totalAssetsUsd_gte:10000, listed:true}) "
-            "{ items { address name symbol chain { id network } totalAssetsUsd liquidityUsd apy netApy performanceFee "
+            "{ items { address name symbol chain { id network } totalAssetsUsd liquidityUsd idleAssetsUsd apy netApy performanceFee "
             "rewards { asset { symbol } supplyApr } curators { items { name } } } } }" % addrs)
         vaults = d["vaultV2s"]["items"]
         d = morpho_query(
@@ -208,6 +208,19 @@ def main():
                 row["performanceFee"] = mv.get("performanceFee")
                 row["liquidity"] = round(mv.get("liquidityUsd") or 0)
                 row["morphoNetApy"] = r((mv.get("netApy") or 0) * 100)
+                total_assets = mv.get("totalAssetsUsd") or 0
+                if total_assets:
+                    row["idleShare"] = r((mv.get("idleAssetsUsd") or 0) / total_assets * 100, 1)
+                # Morpho's own numbers beat DefiLlama's for vault base APY (DefiLlama can report 0
+                # for vaults with idle cash). Base = gross vault APY net of the performance fee.
+                # Rewards: Morpho-native rewards, else DefiLlama's (e.g. off-protocol Merkl campaigns).
+                morpho_base = (mv.get("apy") or 0) * (1 - (mv.get("performanceFee") or 0)) * 100
+                morpho_reward = sum(rw.get("supplyApr") or 0 for rw in mv.get("rewards") or []) * 100
+                row["llamaApy"] = row["apy"]
+                row["apyBase"] = r(morpho_base)
+                row["apyReward"] = r(morpho_reward) if morpho_reward else row["apyReward"]
+                row["apy"] = r(row["apyBase"] + row["apyReward"])
+                row["dataSource"] = "Morpho API + DefiLlama"
                 slug = MORPHO_CHAIN_SLUG.get(mv["chain"]["id"])
                 if slug:
                     row["url"] = f"https://app.morpho.org/{slug}/vault/{mv['address']}"
@@ -246,7 +259,7 @@ def main():
 
     # APY/TVL history for supply venues from DefiLlama.
     for row in supply:
-        if row["dataSource"] != "DefiLlama" or row["tvl"] < MIN_HISTORY_TVL:
+        if row["project"] == "morpho-market" or row["tvl"] < MIN_HISTORY_TVL:
             continue
         try:
             hist = get_json(f"https://yields.llama.fi/chart/{row['id']}")["data"][-HISTORY_DAYS:]
